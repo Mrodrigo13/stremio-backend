@@ -1,5 +1,6 @@
 package com.mario.stremio_backend;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import java.util.*;
@@ -8,7 +9,11 @@ import java.util.*;
 @RequestMapping("/")
 public class StremioAddonController {
 
-    private final String MI_IP_LOCAL = "192.168.3.31"; // Tu IP del Huawei
+    @Autowired
+    private PeliculaRepository repo; // Conexión a tu base de datos H2
+    @Autowired
+    private TMDBService tmdbService;
+    private final String MI_IP_LOCAL = "192.168.3.31";
     private final String MOTOR_TORRENT_PORT = "8090";
 
     @CrossOrigin(origins = "*")
@@ -21,8 +26,6 @@ public class StremioAddonController {
         manifest.put("description", "Streaming local directo PC a TV");
         manifest.put("types", Arrays.asList("movie"));
         manifest.put("resources", Arrays.asList("catalog", "stream"));
-
-        // Magia: Le decimos que vamos a usar IDs de IMDb
         manifest.put("idPrefixes", Arrays.asList("tt"));
 
         Map<String, String> catalog = new HashMap<>();
@@ -38,18 +41,27 @@ public class StremioAddonController {
     public ResponseEntity<Map<String, Object>> getCatalog(@PathVariable String type, @PathVariable String id) {
         List<Map<String, Object>> metas = new ArrayList<>();
 
-        Map<String, Object> movie1 = new HashMap<>();
-        // USAMOS EL ID OFICIAL DE IMDb PARA ENGAÑAR A STREMIO
-        movie1.put("id", "tt6263850");
-        movie1.put("type", "movie");
-        movie1.put("name", "Deadpool & Wolverine (4K Local)");
-        movie1.put("poster", "https://image.tmdb.org/t/p/w500/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg");
-        movie1.put("description", "Prueba de streaming 4K local");
-        metas.add(movie1);
+        repo.findAll().forEach(p -> {
+            // Magia: Pedimos la info real a TMDB usando el ID
+            Map<String, Object> infoReal = tmdbService.getPeliculaInfo(p.getImdbId());
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("metas", metas);
-        return ResponseEntity.ok(response);
+            Map<String, Object> movie = new HashMap<>();
+            movie.put("id", p.getImdbId());
+            movie.put("type", "movie");
+
+            // Si TMDB nos dio datos, los usamos; si no, usamos los de nuestra BD
+            movie.put("name", infoReal.getOrDefault("title", p.getTitulo()));
+            String posterPath = (String) infoReal.get("poster_path");
+            movie.put("poster", (posterPath != null) ? "https://image.tmdb.org/t/p/w500" + posterPath : "https://via.placeholder.com/500x750?text=Sin+Poster");
+            movie.put("description", infoReal.getOrDefault("overview", "Sin descripción disponible localmente."));
+            movie.put("releaseInfo", infoReal.getOrDefault("release_date", "").toString().split("-"));
+            String fullDate = (String) infoReal.getOrDefault("release_date", "");
+            movie.put("releaseInfo", fullDate.contains("-") ? fullDate.split("-")[0] : "");
+
+            metas.add(movie);
+        });
+
+        return ResponseEntity.ok(Map.of("metas", metas));
     }
 
     @CrossOrigin(origins = "*")
@@ -57,30 +69,26 @@ public class StremioAddonController {
     public ResponseEntity<Map<String, Object>> getStream(@PathVariable String type, @PathVariable String id) {
         List<Map<String, Object>> streams = new ArrayList<>();
 
-        if (id.equals("tt6263850")) {
+        // Buscamos en la BD si existe una película con ese ID de IMDb
+        repo.findById(id).ifPresent(p -> {
             Map<String, Object> stream = new HashMap<>();
             stream.put("name", "TorrServer");
-            stream.put("title", "PC Local Directo (4K)");
+            stream.put("title", p.getTitulo() + " (4K Local)");
 
-            // Tu magnet original (que sacarías de tu base de datos)
-            String magnet = "magnet:?xt=urn:btih:bf182eefd20fcbccd02fc3da2b50c899cd690378&dn=How.to.train.your.dragon.2025.2160p.x265.hdr.5.1-dual-lat-cinecalidad.rs.mkv&tr=udp...";
+            // Extraemos el hash del magnet que guardaste en la BD
+            String hash = extraerHash(p.getMagnetLink());
 
-            // 1. Extraemos el hash del magnet automáticamente
-            String hash = extraerHash(magnet);
-
-            // 2. Construimos la URL directa usando tu IP y el hash extraído
             String urlDirecta = "http://" + MI_IP_LOCAL + ":" + MOTOR_TORRENT_PORT + "/stream/video.mkv?link=" + hash + "&index=1&play";
 
             stream.put("url", urlDirecta);
             streams.add(stream);
-        }
+        });
 
         Map<String, Object> response = new HashMap<>();
         response.put("streams", streams);
         return ResponseEntity.ok(response);
     }
 
-    // Esta es la herramienta nueva que saca el texto clave del magnet
     private String extraerHash(String magnet) {
         try {
             int inicio = magnet.indexOf("btih:") + 5;
@@ -91,6 +99,31 @@ public class StremioAddonController {
             return magnet.substring(inicio, fin);
         } catch (Exception e) {
             return "";
+        }
+    }
+    @PostMapping("/api/peliculas")
+    public ResponseEntity<String> guardarPelicula(@RequestBody Pelicula nueva) {
+        try {
+            repo.save(nueva);
+            return ResponseEntity.ok("Guardado");
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("Error");
+        }
+    }
+    // 1. Método para listar las películas en el panel de control
+    @GetMapping("/api/peliculas")
+    public ResponseEntity<List<Pelicula>> obtenerTodasLasPeliculas() {
+        return ResponseEntity.ok(repo.findAll());
+    }
+
+    // 2. Método para eliminar una película cuando ya la viste
+    @DeleteMapping("/api/peliculas/{id}")
+    public ResponseEntity<String> eliminarPelicula(@PathVariable String id) {
+        try {
+            repo.deleteById(id);
+            return ResponseEntity.ok("Película eliminada");
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("Error al eliminar");
         }
     }
 }
